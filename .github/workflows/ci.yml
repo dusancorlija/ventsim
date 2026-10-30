@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    name: host / ${{ matrix.cxx }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with sanitizers
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build -DVENTSIM_WERROR=ON -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -V
+      - name: Scenario and chart
+        run: |
+          ./build/ventsim > scenario.csv 2> breaths.md
+          python3 tools/plot.py scenario.csv scenario.svg
+          cat breaths.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: matrix.cxx == 'g++'
+        with:
+          name: scenario
+          path: |
+            scenario.svg
+            breaths.md
+
+  cortex-m4f:
+    name: firmware / cortex-m4f
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install arm-none-eabi-gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libstdc++-arm-none-eabi-newlib
+      - name: Compile firmware headers (no exceptions, no RTTI, no heap)
+        run: |
+          arm-none-eabi-g++ -std=c++17 -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb \
+            -Os -fno-exceptions -fno-rtti -Wall -Wextra -Werror -Iinclude \
+            -c src/firmware_target.cpp -o fw.o
+          arm-none-eabi-size -A fw.o | tee size.txt
+          {
+            echo "### Firmware on Cortex-M4F (-Os)"
+            echo '```'
+            cat size.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if arm-none-eabi-nm fw.o | grep -E " U (malloc|_Znwj|_Znwm|operator new)"; then
+            echo "heap allocation found"; exit 1
+          fi
